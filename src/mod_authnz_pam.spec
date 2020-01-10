@@ -7,7 +7,7 @@
 
 Summary: PAM authorization checker and PAM Basic Authentication provider
 Name: mod_authnz_pam
-Version: 0.9.3
+Version: 1.1.0
 Release: 1%{?dist}
 License: ASL 2.0
 Group: System Environment/Daemons
@@ -16,7 +16,6 @@ Source0: http://www.adelton.com/apache/mod_authnz_pam/%{name}-%{version}.tar.gz
 BuildRequires: httpd-devel
 BuildRequires: pam-devel
 BuildRequires: pkgconfig
-Requires(pre): httpd
 Requires: httpd-mmn = %{_httpd_mmn}
 Requires: pam
 
@@ -37,7 +36,9 @@ can also be used as full Basic Authentication provider which runs the
 %build
 %{_httpd_apxs} -c -Wc,"%{optflags} -Wall -pedantic -std=c99" -lpam mod_authnz_pam.c
 %if "%{_httpd_modconfdir}" != "%{_httpd_confdir}"
-cp authnz_pam.conf authnz_pam.confx
+echo > authnz_pam.confx
+echo "# Load the module in %{_httpd_modconfdir}/55-authnz_pam.conf" >> authnz_pam.confx
+cat authnz_pam.conf >> authnz_pam.confx
 %else
 cat authnz_pam.module > authnz_pam.confx
 cat authnz_pam.conf >> authnz_pam.confx
@@ -62,6 +63,20 @@ install -Dp -m 0644 authnz_pam.confx $RPM_BUILD_ROOT%{_httpd_confdir}/authnz_pam
 %{_httpd_moddir}/*.so
 
 %changelog
+* Tue Nov 22 2016 Jan Pazdziora <jpazdziora@redhat.com> - 1.1.0-1
+- Logging improvements; success logging moved from notice to info level.
+- Fix redirect for AuthPAMExpiredRedirect with Basic Auth.
+- Fix AuthPAMExpiredRedirect %s escaping on Apache 2.2.
+
+* Mon Mar 21 2016 Jan Pazdziora <jpazdziora@redhat.com> - 1.0.2-1
+- 1319166 - the Requires(pre) httpd does not seem to be needed.
+
+* Tue Nov 10 2015 Jan Pazdziora <jpazdziora@redhat.com> - 1.0.1-1
+- Fix handling of pre-auth / OTP / 2FA situations.
+
+* Thu Jun 25 2015 Jan Pazdziora <jpazdziora@redhat.com> - 1.0.0-1
+- Add support for AuthPAMExpiredRedirect.
+
 * Mon Jun 23 2014 Jan Pazdziora <jpazdziora@redhat.com> - 0.9.3-1
 - Fix module loading/configuration for Apache 2.4.
 - Set PAM_RHOST.

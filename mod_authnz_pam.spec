@@ -7,17 +7,15 @@
 
 Summary: PAM authorization checker and PAM Basic Authentication provider
 Name: mod_authnz_pam
-Version: 0.9.3
-Release: 5%{?dist}
+Version: 1.1.0
+Release: 1%{?dist}
 License: ASL 2.0
 Group: System Environment/Daemons
 URL: http://www.adelton.com/apache/mod_authnz_pam/
 Source0: http://www.adelton.com/apache/mod_authnz_pam/%{name}-%{version}.tar.gz
-Patch1: mod_authnz_pam-otp.patch
 BuildRequires: httpd-devel
 BuildRequires: pam-devel
 BuildRequires: pkgconfig
-Requires(pre): httpd
 Requires: httpd-mmn = %{_httpd_mmn}
 Requires: pam
 
@@ -34,12 +32,13 @@ can also be used as full Basic Authentication provider which runs the
 
 %prep
 %setup -q -n %{name}-%{version}
-%patch1 -p1
 
 %build
 %{_httpd_apxs} -c -Wc,"%{optflags} -Wall -pedantic -std=c99" -lpam mod_authnz_pam.c
 %if "%{_httpd_modconfdir}" != "%{_httpd_confdir}"
-cp authnz_pam.conf authnz_pam.confx
+echo > authnz_pam.confx
+echo "# Load the module in %{_httpd_modconfdir}/55-authnz_pam.conf" >> authnz_pam.confx
+cat authnz_pam.conf >> authnz_pam.confx
 %else
 cat authnz_pam.module > authnz_pam.confx
 cat authnz_pam.conf >> authnz_pam.confx
@@ -64,6 +63,9 @@ install -Dp -m 0644 authnz_pam.confx $RPM_BUILD_ROOT%{_httpd_confdir}/authnz_pam
 %{_httpd_moddir}/*.so
 
 %changelog
+* Mon Mar 13 2017 Tibor Dudlák <tdudlak@redaht.com> - 1.1.0-1
+- 1399183 - Rebase to upstream release 1.1.0.
+
 * Thu Nov 19 2015 Jan Pazdziora <jpazdziora@redhat.com> - 0.9.3-5
 - 1279591 - Fix OTP use case for modules with pre-auth.
 

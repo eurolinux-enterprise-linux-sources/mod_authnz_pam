@@ -1,6 +1,6 @@
 
 /*
- * Copyright 2014 Jan Pazdziora
+ * Copyright 2014--2016 Jan Pazdziora
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@
 
 typedef struct {
 	char * pam_service;
+	char * expired_redirect_url;
 } authnz_pam_config_rec;
 
 static void * create_dir_conf(apr_pool_t * pool, char * dir) {
@@ -43,6 +44,9 @@ static const command_rec authnz_pam_cmds[] = {
 	AP_INIT_TAKE1("AuthPAMService", ap_set_string_slot,
 		(void *)APR_OFFSETOF(authnz_pam_config_rec, pam_service),
 		OR_AUTHCFG, "PAM service to authenticate against"),
+	AP_INIT_TAKE1("AuthPAMExpiredRedirect", ap_set_string_slot,
+		(void *)APR_OFFSETOF(authnz_pam_config_rec, expired_redirect_url),
+		OR_AUTHCFG, "URL to redirect to user credentials expired have expired"),
 	{NULL}
 };
 
@@ -57,7 +61,11 @@ static int pam_authenticate_conv(int num_msg, const struct pam_message ** msg, s
 		response[i].resp = 0;
 		response[i].resp_retcode = 0;
 		if (msg[i]->msg_style == PAM_PROMPT_ECHO_OFF) {
-			response[i].resp = strdup(appdata_ptr);
+			if (i == 0) {
+				response[i].resp = strdup(appdata_ptr);
+			} else {
+				response[i].resp = NULL;
+			}
 		} else {
 			free(response);
 			return PAM_CONV_ERR;
@@ -66,6 +74,73 @@ static int pam_authenticate_conv(int num_msg, const struct pam_message ** msg, s
 	* resp = response;
 	return PAM_SUCCESS;
 }
+
+#if AP_MODULE_MAGIC_AT_LEAST(20111025,1)
+#else
+#include <stdio.h>
+#include "apr_lib.h"
+static const char * ap_escape_urlencoded(apr_pool_t * pool, const char * buffer) {
+	char * copy = apr_palloc(pool, 3 * strlen(buffer) + 1);
+	char * p = copy;
+	while (*buffer) {
+		if (!apr_isalnum(*buffer) && !strchr(".-*_ ", *buffer)) {
+			*p++ = '%';
+			p += snprintf(p, 3, "%02x", *buffer);
+		} else if (*buffer == ' ') {
+			*p++ = '+';
+		} else {
+			*p++ = *buffer;
+		}
+		buffer++;
+	}
+	*p = '\0';
+	return copy;
+}
+#endif
+
+
+static const char * format_location(request_rec * r, const char * url, const char *login) {
+	const char * out = "";
+	const char * p = url;
+	const char * append = NULL;
+	while (*p) {
+		if (*p == '%') {
+			if (*(p + 1) == '%') {
+				append = "%";
+			} else if (*(p + 1) == 's') {
+				append = ap_construct_url(r->pool, r->uri, r);
+				if (r->args) {
+					append = apr_pstrcat(r->pool, append, "?", r->args, NULL);
+				}
+			} else if (*(p + 1) == 'u') {
+				append = login;
+			}
+		}
+		if (append) {
+			char * prefix = "";
+			if (p != url) {
+				prefix = apr_pstrndup(r->pool, url, p - url);
+			}
+			out = apr_pstrcat(r->pool, out, prefix, ap_escape_urlencoded(r->pool, append), NULL);
+			p++;
+			url = p + 1;
+			append = NULL;
+		}
+		p++;
+	}
+	if (p != url) {
+		out = apr_pstrcat(r->pool, out, url, NULL);
+	}
+	return out;
+}
+
+module AP_MODULE_DECLARE_DATA authnz_pam_module;
+
+#ifdef APLOG_USE_MODULE
+#define SHOW_MODULE ""
+#else
+#define SHOW_MODULE "mod_authnz_pam: "
+#endif
 
 #define _REMOTE_USER_ENV_NAME "REMOTE_USER"
 #define _EXTERNAL_AUTH_ERROR_ENV_NAME "EXTERNAL_AUTH_ERROR"
@@ -97,18 +172,30 @@ static authn_status pam_authenticate_with_login_password(request_rec * r, const 
 			param = login;
 			stage = "PAM account validation failed for user";
 			ret = pam_acct_mgmt(pamh, PAM_SILENT | PAM_DISALLOW_NULL_AUTHTOK);
+			if (ret == PAM_NEW_AUTHTOK_REQD) {
+				authnz_pam_config_rec * conf = ap_get_module_config(r->per_dir_config, &authnz_pam_module);
+				if (conf && conf->expired_redirect_url) {
+					ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+						SHOW_MODULE "PAM_NEW_AUTHTOK_REQD: redirect to [%s]",
+						conf->expired_redirect_url);
+					apr_table_addn(r->headers_out, "Location", format_location(r, conf->expired_redirect_url, login));
+					r->status = HTTP_TEMPORARY_REDIRECT;
+					ap_send_error_response(r, 0);
+					return AUTH_DENIED;
+				}
+			}
 		}
 	}
 	if (ret != PAM_SUCCESS) {
 		const char * strerr = pam_strerror(pamh, ret);
-		ap_log_error(APLOG_MARK, APLOG_WARNING, 0, r->server, "mod_authnz_pam: %s %s: %s", stage, param, strerr);
+		ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, SHOW_MODULE "%s %s: %s", stage, param, strerr);
 		apr_table_setn(r->subprocess_env, _EXTERNAL_AUTH_ERROR_ENV_NAME, apr_pstrdup(r->pool, strerr));
 		pam_end(pamh, ret);
 		return AUTH_DENIED;
 	}
 	apr_table_setn(r->subprocess_env, _REMOTE_USER_ENV_NAME, login);
 	r->user = apr_pstrdup(r->pool, login);
-	ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "mod_authnz_pam: PAM authentication passed for user %s", login);
+	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, SHOW_MODULE "PAM authentication passed for user %s", login);
 	pam_end(pamh, ret);
 	return AUTH_GRANTED;
 }
@@ -116,8 +203,6 @@ static authn_status pam_authenticate_with_login_password(request_rec * r, const 
 APR_DECLARE_OPTIONAL_FN(authn_status, pam_authenticate_with_login_password,
 	(request_rec * r, const char * pam_service,
 	const char * login, const char * password, int steps));
-
-module AP_MODULE_DECLARE_DATA authnz_pam_module;
 
 static authn_status pam_auth_account(request_rec * r, const char * login, const char * password) {
 	authnz_pam_config_rec * conf = ap_get_module_config(r->per_dir_config, &authnz_pam_module);
@@ -192,7 +277,12 @@ static void register_hooks(apr_pool_t * p) {
 	APR_REGISTER_OPTIONAL_FN(pam_authenticate_with_login_password);
 }
 
-module AP_MODULE_DECLARE_DATA authnz_pam_module = {
+#ifdef AP_DECLARE_MODULE
+AP_DECLARE_MODULE(authnz_pam)
+#else
+module AP_MODULE_DECLARE_DATA authnz_pam_module
+#endif
+	= {
 	STANDARD20_MODULE_STUFF,
 	create_dir_conf,	/* Per-directory configuration handler */
 	NULL,			/* Merge handler for per-directory configurations */
